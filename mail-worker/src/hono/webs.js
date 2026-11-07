@@ -21,4 +21,5 @@ import '../api/public-api'
 import '../api/telegram-api'
 import '../api/oauth-api'
 import '../api/mcp-api'
+import '../api/mcp-oauth-api'
 export default app;

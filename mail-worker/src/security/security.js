@@ -1,5 +1,4 @@
 import BizError from '../error/biz-error';
-import apiResult from '../model/result';
 import constant from '../const/constant';
 import jwtUtils from '../utils/jwt-utils';
 import KvConst from '../const/kv-const';
@@ -7,7 +6,7 @@ import dayjs from 'dayjs';
 import userService from '../service/user-service';
 import permService from '../service/perm-service';
 import settingService from '../service/setting-service';
-import { authorizeMcpToken } from '../service/mcp-service';
+import mcpOauthService from '../service/mcp-oauth-service';
 import { t } from '../i18n/i18n'
 import app from '../hono/hono';
 
@@ -21,7 +20,8 @@ const exclude = [
 	'/public/genToken',
 	'/telegram',
 	'/test',
-	'/oauth'
+	'/oauth',
+	'/.well-known'
 ];
 
 const requirePerms = [
@@ -124,21 +124,18 @@ app.use('*', async (c, next) => {
 		}
 
 		const settingRow = await settingService.query(c);
-		const auth = authorizeMcpToken({
-			mcpStatus: settingRow.mcpStatus,
-			mcpToken: settingRow.mcpToken,
-			authorization: c.req.header(constant.TOKEN_HEADER)
-		});
+		const auth = await mcpOauthService.authorizeMcp(c, settingRow);
 
 		// onError 只把 BizError 写进 JSON code，HTTP 仍是 200。MCP 客户端认 HTTP 状态，这里直接返回 403/401
+		// 401 必须带 resource_metadata，OAuth 客户端靠这个头找到授权服务器。403 不带
 		if (!auth.ok) {
-			return c.json(apiResult.fail(auth.message, auth.status), auth.status);
+			return mcpOauthService.respondMcpAuthFailure(c, auth);
 		}
 
 		// MCP 令牌等同管理员权限，后续 service 按管理员用户取数
 		const adminUser = await userService.selectByEmailIncludeDel(c, c.env.admin);
 		if (!adminUser) {
-			return c.json(apiResult.fail(t('notExistUser'), 401), 401);
+			return mcpOauthService.respondMcpAuthFailure(c, { status: 401, message: t('notExistUser') });
 		}
 
 		c.set('user', adminUser);

@@ -21,6 +21,11 @@ export default {
 			return app.fetch(req, env, ctx);
 		}
 
+		// OAuth 发现和授权端点不走 /api 前缀，也不剥路径
+		if (url.pathname.startsWith('/.well-known/') || url.pathname.startsWith('/oauth/')) {
+			return app.fetch(req, env, ctx);
+		}
+
 		if (url.pathname.startsWith('/oss/')) {
 			const key = url.pathname.slice('/oss/'.length);
 			const resp = await r2Service.toObjResp({ env }, key);
