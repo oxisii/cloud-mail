@@ -35,3 +35,11 @@ export function settingMcpToken() {
 export function settingMcpRevoke() {
     return http.delete('/setting/mcp/token')
 }
+
+export function settingMcpDevices() {
+    return http.get('/setting/mcp/devices')
+}
+
+export function settingMcpDeviceRevoke(deviceId) {
+    return http.delete('/setting/mcp/devices', {params: {deviceId}})
+}

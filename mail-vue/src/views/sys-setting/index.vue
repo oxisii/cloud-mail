@@ -757,6 +757,23 @@ Authorization: &lt;secret&gt;</pre>
               <el-button @click="copyText(mcpOauthDiscovery)">{{ $t('copy') }}</el-button>
             </template>
           </el-input>
+          <div class="mcp-label">{{ $t('mcpDevices') }}</div>
+          <div v-if="!mcpDevices.length" class="mcp-empty">{{ $t('mcpDevicesEmpty') }}</div>
+          <div v-else class="mcp-devices">
+            <div v-for="device in mcpDevices" :key="device.deviceId" class="mcp-device">
+              <div class="mcp-device-main">
+                <div class="mcp-device-name">{{ mcpDeviceName(device) }}</div>
+                <div class="mcp-device-ua" :title="device.userAgent || ''">{{ mcpDeviceUa(device.userAgent) }}</div>
+                <div class="mcp-device-time">
+                  <span>{{ $t('mcpDeviceAuthorized') }} {{ formatMcpDeviceTime(device.createdAt) }}</span>
+                  <span>{{ $t('mcpDeviceLastUsed') }} {{ formatMcpDeviceTime(device.lastUsedAt) }}</span>
+                </div>
+              </div>
+              <el-button size="small" :loading="mcpDeviceRevoking === device.deviceId" @click="revokeMcpDevice(device)">
+                {{ $t('mcpDeviceRevoke') }}
+              </el-button>
+            </div>
+          </div>
           <div class="mcp-label">{{ $t('mcpToolOverview') }}</div>
           <div class="mcp-tools">
             <span v-for="group in mcpToolGroups" :key="group.key" class="mcp-tool-tag">
@@ -989,7 +1006,7 @@ Authorization: &lt;secret&gt;</pre>
 
 <script setup>
 import {computed, defineOptions, nextTick, reactive, ref} from "vue";
-import {deleteBackground, setBackground, setBlackList, settingMcp, settingMcpRevoke, settingMcpToken, settingQuery, settingSet} from "@/request/setting.js";
+import {deleteBackground, setBackground, setBlackList, settingMcp, settingMcpDeviceRevoke, settingMcpDevices, settingMcpRevoke, settingMcpToken, settingQuery, settingSet} from "@/request/setting.js";
 import {useSettingStore} from "@/store/setting.js";
 import {useUiStore} from "@/store/ui.js";
 import {useUserStore} from "@/store/user.js";
@@ -1002,6 +1019,7 @@ import {isDomain, isEmail, isIpUrl} from "@/utils/verify-utils.js";
 import loading from "@/components/loading/index.vue";
 import {getTextWidth} from "@/utils/text.js";
 import {fileToBase64} from "@/utils/file-utils.js"
+import {tzDayjs} from "@/utils/day.js";
 import {useI18n} from 'vue-i18n';
 import axios from "axios";
 
@@ -1134,6 +1152,8 @@ const mcpTokenLoading = ref(false)
 const mcpReady = ref(false)
 const mcpStatus = ref(1)
 const mcpToken = ref('')
+const mcpDevices = ref([])
+const mcpDeviceRevoking = ref('')
 const mcpToolGroups = computed(() => [
   {key: 'email', label: t('mcpGroupEmail'), count: 6},
   {key: 'allEmail', label: t('mcpGroupAllEmail'), count: 4},
@@ -1365,15 +1385,45 @@ function openWebhookSetting() {
   webhookShow.value = true
 }
 
+function loadMcpDevices() {
+  return settingMcpDevices().then(data => {
+    mcpDevices.value = Array.isArray(data?.devices) ? data.devices : []
+  }).catch(() => {
+    mcpDevices.value = []
+  })
+}
+
+function mcpDeviceName(device) {
+  const name = typeof device?.clientName === 'string' ? device.clientName.trim() : ''
+  if (name) return name
+  const id = device?.clientId || device?.deviceId || ''
+  return id.slice(0, 8)
+}
+
+function mcpDeviceUa(userAgent) {
+  const text = typeof userAgent === 'string' ? userAgent.trim() : ''
+  if (!text) return t('mcpDeviceUaEmpty')
+  return text.length > 64 ? `${text.slice(0, 64)}...` : text
+}
+
+function formatMcpDeviceTime(value) {
+  if (!value) return t('unknown')
+  return tzDayjs(value).format('YYYY-MM-DD HH:mm')
+}
+
 function openMcpSetting() {
   mcpReady.value = false
   mcpShow.value = true
   mcpLoading.value = true
-  settingMcp().then(data => {
-    mcpStatus.value = data?.status ?? 1
-    mcpToken.value = data?.token || ''
-    setting.value.mcpStatus = mcpStatus.value
-  }).finally(() => {
+  mcpDevices.value = []
+  Promise.all([
+    settingMcp().then(data => {
+      mcpStatus.value = data?.status ?? 1
+      mcpToken.value = data?.token || ''
+      setting.value.mcpStatus = mcpStatus.value
+    }),
+    loadMcpDevices()
+  ]).catch(() => {}).finally(() => {
     mcpLoading.value = false
     nextTick(() => {
       mcpReady.value = true
@@ -1440,6 +1490,26 @@ function revokeMcpToken() {
       })
     }).finally(() => {
       mcpTokenLoading.value = false
+    })
+  }).catch(() => {})
+}
+
+function revokeMcpDevice(device) {
+  ElMessageBox.confirm(t('mcpDeviceRevokeConfirm'), {
+    confirmButtonText: t('confirm'),
+    cancelButtonText: t('cancel'),
+    type: 'warning'
+  }).then(() => {
+    mcpDeviceRevoking.value = device.deviceId
+    settingMcpDeviceRevoke(device.deviceId).then(() => {
+      ElMessage({
+        message: t('saveSuccessMsg'),
+        type: 'success',
+        plain: true
+      })
+      return loadMcpDevices()
+    }).finally(() => {
+      mcpDeviceRevoking.value = ''
     })
   }).catch(() => {})
 }
@@ -2346,6 +2416,53 @@ function editSetting(settingForm, refreshStatus = true) {
   border-radius: 4px;
   background: var(--el-fill-color-light);
   font-size: 12px;
+}
+
+.mcp-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.mcp-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--el-fill-color-light);
+}
+
+.mcp-device-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mcp-device-name {
+  font-weight: 600;
+}
+
+.mcp-device-ua,
+.mcp-device-time {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.mcp-device-ua {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-device-time {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
 }
 
 .forward {
