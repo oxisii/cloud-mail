@@ -1,10 +1,13 @@
 import BizError from '../error/biz-error';
+import apiResult from '../model/result';
 import constant from '../const/constant';
 import jwtUtils from '../utils/jwt-utils';
 import KvConst from '../const/kv-const';
 import dayjs from 'dayjs';
 import userService from '../service/user-service';
 import permService from '../service/perm-service';
+import settingService from '../service/setting-service';
+import { authorizeMcpToken } from '../service/mcp-service';
 import { t } from '../i18n/i18n'
 import app from '../hono/hono';
 
@@ -43,6 +46,8 @@ const requirePerms = [
 	'/setting/deleteBackground',
 	'/setting/set',
 	'/setting/query',
+	'/setting/mcp/token',
+	'/setting/mcp',
 	'/setting/setBlacklist',
 	'/user/delete',
 	'/user/setPwd',
@@ -81,8 +86,8 @@ const premKey = {
 	'user:delete': ['/user/delete','/user/deleteAccount'],
 	'all-email:query': ['/allEmail/list','/allEmail/latest'],
 	'all-email:delete': ['/allEmail/delete','/allEmail/batchDelete'],
-	'setting:query': ['/setting/query'],
-	'setting:set': ['/setting/set', '/setting/setBackground','/setting/deleteBackground','/setting/setBlacklist'],
+	'setting:query': ['/setting/query', '/setting/mcp'],
+	'setting:set': ['/setting/set', '/setting/setBackground','/setting/deleteBackground','/setting/setBlacklist', '/setting/mcp/token'],
 	'analysis:query': ['/analysis/echarts'],
 	'reg-key:add': ['/regKey/add'],
 	'reg-key:query': ['/regKey/list','/regKey/history'],
@@ -108,6 +113,35 @@ app.use('*', async (c, next) => {
 		if (publicToken !== userPublicToken) {
 			throw new BizError(t('publicTokenFail'), 401);
 		}
+		return await next();
+	}
+
+	if (path === '/mcp' || path.startsWith('/mcp/')) {
+
+		// GET 固定 405，不走令牌校验
+		if (c.req.method === 'GET') {
+			return await next();
+		}
+
+		const settingRow = await settingService.query(c);
+		const auth = authorizeMcpToken({
+			mcpStatus: settingRow.mcpStatus,
+			mcpToken: settingRow.mcpToken,
+			authorization: c.req.header(constant.TOKEN_HEADER)
+		});
+
+		// onError 只把 BizError 写进 JSON code，HTTP 仍是 200。MCP 客户端认 HTTP 状态，这里直接返回 403/401
+		if (!auth.ok) {
+			return c.json(apiResult.fail(auth.message, auth.status), auth.status);
+		}
+
+		// MCP 令牌等同管理员权限，后续 service 按管理员用户取数
+		const adminUser = await userService.selectByEmailIncludeDel(c, c.env.admin);
+		if (!adminUser) {
+			return c.json(apiResult.fail(t('notExistUser'), 401), 401);
+		}
+
+		c.set('user', adminUser);
 		return await next();
 	}
 

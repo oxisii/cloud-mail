@@ -10,6 +10,7 @@ import {t} from '../i18n/i18n'
 import verifyRecordService from './verify-record-service';
 import userContext from '../security/user-context';
 import domainUtils from '../utils/domain-uitls';
+import { v4 as uuidv4 } from 'uuid';
 
 const settingService = {
 
@@ -88,6 +89,7 @@ const settingService = {
 		settingRow.s3AccessKey = settingRow.s3AccessKey ? `${settingRow.s3AccessKey.slice(0, 12)}******` : null;
 		settingRow.s3SecretKey = settingRow.s3SecretKey ? `${settingRow.s3SecretKey.slice(0, 12)}******` : null;
 		settingRow.tgBotToken = settingRow.tgBotToken ? `${settingRow.tgBotToken.slice(0, 20)}******` : null;
+		settingRow.mcpToken = settingRow.mcpToken ? `${settingRow.mcpToken.slice(0, 12)}******` : null;
 		settingRow.hasR2 = !!c.env.r2
 		settingRow.hasCfEmail = !!c.env.email
 
@@ -187,6 +189,18 @@ const settingService = {
 		await orm(c).update(setting).set({ blackSubject, blackContent, blackFrom }).run();
 		await this.refresh(c);
 		return this.get(c);
+	},
+
+	async rotateMcpToken(c) {
+		const token = uuidv4();
+		await orm(c).update(setting).set({ mcpToken: token }).run();
+		await this.refresh(c);
+		return { token };
+	},
+
+	async clearMcpToken(c) {
+		await orm(c).update(setting).set({ mcpToken: '' }).run();
+		await this.refresh(c);
 	},
 
 	async websiteConfig(c) {

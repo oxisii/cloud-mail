@@ -33,6 +33,7 @@ const dbInit = {
 		await this.v3_2DB(c);
 		await this.v3_3DB(c);
 		await this.v3_4DB(c);
+		await this.v3_5DB(c);
 		await settingService.refresh(c);
 		return c.text('success');
 	},
@@ -40,6 +41,19 @@ const dbInit = {
 	async v3_4DB(c) {
 		try {
 			await c.env.db.prepare(`ALTER TABLE email ADD COLUMN sender_email TEXT NOT NULL DEFAULT '';`).run();
+		} catch (e) {
+			console.warn(`跳过字段：${e.message}`);
+		}
+	},
+
+	async v3_5DB(c) {
+		try {
+			await c.env.db.prepare(`ALTER TABLE setting ADD COLUMN mcp_status INTEGER NOT NULL DEFAULT 1;`).run();
+		} catch (e) {
+			console.warn(`跳过字段：${e.message}`);
+		}
+		try {
+			await c.env.db.prepare(`ALTER TABLE setting ADD COLUMN mcp_token TEXT NOT NULL DEFAULT '';`).run();
 		} catch (e) {
 			console.warn(`跳过字段：${e.message}`);
 		}
