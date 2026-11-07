@@ -5,6 +5,7 @@ import userContext from "../security/user-context";
 import BizError from '../error/biz-error';
 import { t } from '../i18n/i18n';
 import mcpService from '../service/mcp-service';
+import mcpOauthService from '../service/mcp-oauth-service';
 
 function assertAdmin(c) {
 	const user = userContext.getUser(c);
@@ -63,6 +64,18 @@ app.post('/setting/mcp/token', async (c) => {
 app.delete('/setting/mcp/token', async (c) => {
 	assertAdmin(c);
 	await settingService.clearMcpToken(c);
+	return c.json(result.ok());
+});
+
+app.get('/setting/mcp/devices', async (c) => {
+	assertAdmin(c);
+	const devices = await mcpOauthService.listDevices(c);
+	return c.json(result.ok({ devices }));
+});
+
+app.delete('/setting/mcp/devices', async (c) => {
+	assertAdmin(c);
+	await mcpOauthService.revokeDevice(c, c.req.query('deviceId'));
 	return c.json(result.ok());
 });
 

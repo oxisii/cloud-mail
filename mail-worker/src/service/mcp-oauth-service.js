@@ -13,6 +13,7 @@ const ACCESS_TTL = 3600;
 const REFRESH_TTL = 30 * 24 * 60 * 60;
 const FAIL_TTL = 3600;
 const FAIL_LIMIT = 10;
+const DEVICE_TOUCH_MS = 300 * 1000;
 const SCOPE = 'mcp';
 
 const AUTH_METHODS = ['none', 'client_secret_post', 'client_secret_basic'];
@@ -66,6 +67,11 @@ function escapeHtml(value) {
 
 function originOf(c) {
 	return new URL(c.req.url).origin;
+}
+
+function requestUserAgent(c) {
+	const value = c.req?.header?.('user-agent');
+	return typeof value === 'string' ? value : '';
 }
 
 function presentedToken(authorization) {
@@ -450,13 +456,16 @@ export async function authorizePost(c, params) {
 
 	await c.env.kv.delete(failKey(email, ip));
 	const code = randomToken(32);
+	const deviceId = randomToken(32);
 	await c.env.kv.put(KvConst.MCP_OAUTH_CODE + code, JSON.stringify({
 		clientId: check.client.clientId,
 		redirectUri: params.redirect_uri,
 		codeChallenge: params.code_challenge,
 		resource: params.resource || '',
 		scope: SCOPE,
-		createdAt: Date.now()
+		createdAt: Date.now(),
+		deviceId,
+		userAgent: requestUserAgent(c)
 	}), { expirationTtl: CODE_TTL });
 
 	const location = new URL(params.redirect_uri);
@@ -551,17 +560,57 @@ async function authenticateClient(c, params, basic) {
 	return { ok: true, client };
 }
 
-async function issueTokens(c, client) {
+function deviceKey(deviceId) {
+	return KvConst.MCP_OAUTH_DEVICE + deviceId;
+}
+
+async function putDevice(c, record) {
+	await c.env.kv.put(deviceKey(record.deviceId), JSON.stringify(record));
+}
+
+async function writeNewDevice(c, { deviceId, client, userAgent, accessToken, refreshToken }) {
+	const now = Date.now();
+	await putDevice(c, {
+		deviceId,
+		clientId: client.clientId,
+		clientName: typeof client.clientName === 'string' ? client.clientName : '',
+		userAgent: userAgent || '',
+		createdAt: now,
+		lastUsedAt: now,
+		accessToken,
+		refreshToken
+	});
+}
+
+async function updateDevicePointers(c, deviceId, { client, userAgent, accessToken, refreshToken }) {
+	const existing = await c.env.kv.get(deviceKey(deviceId), { type: 'json' });
+	if (!existing) {
+		await writeNewDevice(c, { deviceId, client, userAgent, accessToken, refreshToken });
+		return;
+	}
+	existing.lastUsedAt = Date.now();
+	existing.accessToken = accessToken;
+	existing.refreshToken = refreshToken;
+	await putDevice(c, existing);
+}
+
+async function issueTokens(c, client, deviceId) {
 	const access = randomToken(32);
 	const refresh = randomToken(32);
 	const createdAt = Date.now();
-	const accessRecord = JSON.stringify({ clientId: client.clientId, createdAt });
-	const refreshRecord = JSON.stringify({ clientId: client.clientId, createdAt });
-	await c.env.kv.put(KvConst.MCP_OAUTH_ACCESS + access, accessRecord, { expirationTtl: ACCESS_TTL });
-	await c.env.kv.put(KvConst.MCP_OAUTH_REFRESH + refresh, refreshRecord, { expirationTtl: REFRESH_TTL });
+	const accessRecord = { clientId: client.clientId, createdAt };
+	const refreshRecord = { clientId: client.clientId, createdAt };
+	if (deviceId) {
+		accessRecord.deviceId = deviceId;
+		refreshRecord.deviceId = deviceId;
+	}
+	await c.env.kv.put(KvConst.MCP_OAUTH_ACCESS + access, JSON.stringify(accessRecord), { expirationTtl: ACCESS_TTL });
+	await c.env.kv.put(KvConst.MCP_OAUTH_REFRESH + refresh, JSON.stringify(refreshRecord), { expirationTtl: REFRESH_TTL });
 	return {
 		status: 200,
 		headers: { ...NO_STORE },
+		accessToken: access,
+		refreshToken: refresh,
 		body: {
 			access_token: access,
 			token_type: 'Bearer',
@@ -594,7 +643,18 @@ async function exchangeCode(c, params, client) {
 	if (!safeEqual(challenge, record.codeChallenge)) {
 		return oauthError(400, 'invalid_grant', 'PKCE verification failed');
 	}
-	return issueTokens(c, client);
+	const issued = await issueTokens(c, client, record.deviceId);
+	// 上线前的授权码没有 deviceId，兑换时不补建设备
+	if (record.deviceId) {
+		await writeNewDevice(c, {
+			deviceId: record.deviceId,
+			client,
+			userAgent: typeof record.userAgent === 'string' ? record.userAgent : '',
+			accessToken: issued.accessToken,
+			refreshToken: issued.refreshToken
+		});
+	}
+	return issued;
 }
 
 async function exchangeRefresh(c, params, client) {
@@ -608,7 +668,28 @@ async function exchangeRefresh(c, params, client) {
 		return oauthError(400, 'invalid_grant', 'Refresh token is invalid');
 	}
 	await c.env.kv.delete(key);
-	return issueTokens(c, client);
+	// 旧刷新令牌没有 deviceId，下一次刷新时补建设备，之后沿用同一个 deviceId
+	const legacy = !record.deviceId;
+	const deviceId = record.deviceId || randomToken(32);
+	const issued = await issueTokens(c, client, deviceId);
+	const userAgent = requestUserAgent(c);
+	if (legacy) {
+		await writeNewDevice(c, {
+			deviceId,
+			client,
+			userAgent,
+			accessToken: issued.accessToken,
+			refreshToken: issued.refreshToken
+		});
+	} else {
+		await updateDevicePointers(c, deviceId, {
+			client,
+			userAgent,
+			accessToken: issued.accessToken,
+			refreshToken: issued.refreshToken
+		});
+	}
+	return issued;
 }
 
 export async function exchangeToken(c, params, basic) {
@@ -644,6 +725,82 @@ export async function revokeToken(c, params) {
 	return { status: 200, empty: true };
 }
 
+function projectDevice(record) {
+	return {
+		deviceId: record.deviceId,
+		clientId: record.clientId || '',
+		clientName: record.clientName || '',
+		userAgent: record.userAgent || '',
+		createdAt: record.createdAt || 0,
+		lastUsedAt: record.lastUsedAt || 0
+	};
+}
+
+export async function listDevices(c) {
+	const devices = [];
+	let cursor;
+	const seen = new Set();
+	do {
+		if (cursor) {
+			if (seen.has(cursor)) {
+				break;
+			}
+			seen.add(cursor);
+		}
+		const options = { prefix: KvConst.MCP_OAUTH_DEVICE };
+		if (cursor) {
+			options.cursor = cursor;
+		}
+		const listed = await c.env.kv.list(options);
+		for (const item of listed?.keys || []) {
+			const record = await c.env.kv.get(item.name, { type: 'json' });
+			if (!record?.deviceId) {
+				continue;
+			}
+			devices.push(projectDevice(record));
+		}
+		cursor = listed?.list_complete === false ? listed.cursor : undefined;
+	} while (cursor);
+	devices.sort((left, right) => (right.lastUsedAt || 0) - (left.lastUsedAt || 0));
+	return devices;
+}
+
+export async function revokeDevice(c, deviceId) {
+	if (!deviceId || typeof deviceId !== 'string') {
+		return;
+	}
+	const record = await c.env.kv.get(deviceKey(deviceId), { type: 'json' });
+	if (record?.accessToken) {
+		await c.env.kv.delete(KvConst.MCP_OAUTH_ACCESS + record.accessToken);
+	}
+	if (record?.refreshToken) {
+		await c.env.kv.delete(KvConst.MCP_OAUTH_REFRESH + record.refreshToken);
+	}
+	await c.env.kv.delete(deviceKey(deviceId));
+}
+
+// 距上次写入超过 300 秒才更新最近使用时间，写入失败不影响鉴权
+async function touchDevice(c, deviceId) {
+	if (!deviceId || !c.env?.kv) {
+		return;
+	}
+	try {
+		const key = deviceKey(deviceId);
+		const record = await c.env.kv.get(key, { type: 'json' });
+		if (!record) {
+			return;
+		}
+		const now = Date.now();
+		if (typeof record.lastUsedAt === 'number' && now - record.lastUsedAt <= DEVICE_TOUCH_MS) {
+			return;
+		}
+		record.lastUsedAt = now;
+		await c.env.kv.put(key, JSON.stringify(record));
+	} catch (error) {
+		console.error(error);
+	}
+}
+
 export async function authorizeMcp(c, settingRow) {
 	const authorization = c.req.header(constant.TOKEN_HEADER);
 	const staticAuth = authorizeMcpToken({
@@ -657,13 +814,16 @@ export async function authorizeMcp(c, settingRow) {
 
 	const token = presentedToken(authorization);
 	if (token && c.env?.kv) {
+		let record;
 		try {
-			const record = await c.env.kv.get(KvConst.MCP_OAUTH_ACCESS + token, { type: 'json' });
-			if (record?.clientId) {
-				return { ok: true };
-			}
+			record = await c.env.kv.get(KvConst.MCP_OAUTH_ACCESS + token, { type: 'json' });
 		} catch (error) {
 			console.error(error);
+			return staticAuth;
+		}
+		if (record?.clientId) {
+			await touchDevice(c, record.deviceId);
+			return { ok: true };
 		}
 	}
 	return staticAuth;
@@ -686,6 +846,8 @@ const mcpOauthService = {
 	authorizePost,
 	exchangeToken,
 	revokeToken,
+	listDevices,
+	revokeDevice,
 	authorizeMcp,
 	respondMcpAuthFailure,
 	parseBasicAuth,
