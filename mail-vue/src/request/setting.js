@@ -23,3 +23,15 @@ export function deleteBackground() {
 export function setBlackList(params) {
     return http.put('/setting/setBlacklist', params)
 }
+
+export function settingMcp() {
+    return http.get('/setting/mcp')
+}
+
+export function settingMcpToken() {
+    return http.post('/setting/mcp/token')
+}
+
+export function settingMcpRevoke() {
+    return http.delete('/setting/mcp/token')
+}

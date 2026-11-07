@@ -273,6 +273,21 @@
             </div>
           </div>
 
+          <div class="settings-card">
+            <div class="card-title">{{ $t('mcp') }}</div>
+            <div class="card-content">
+              <div class="setting-item">
+                <div><span>{{ $t('mcp') }}</span></div>
+                <div class="forward">
+                  <span>{{ setting.mcpStatus === 0 ? $t('enabled') : $t('mcpNotEnabled') }}</span>
+                  <el-button class="opt-button" size="small" type="primary" @click="openMcpSetting">
+                    <Icon icon="fluent:settings-48-regular" width="18" height="18"/>
+                  </el-button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Object Storage Card -->
           <div class="settings-card">
             <div class="card-title">{{ $t('oss') }}</div>
@@ -689,6 +704,55 @@ Authorization: &lt;secret&gt;</pre>
           </div>
         </template>
       </el-dialog>
+      <el-dialog v-model="mcpShow" class="forward-dialog mcp-dialog">
+        <template #header>
+          <div class="forward-head">
+            <span class="forward-set-title">{{ $t('mcp') }}</span>
+            <el-tooltip effect="dark" :content="$t('mcpDesc')">
+              <Icon class="warning" icon="fe:warning" width="18" height="18"/>
+            </el-tooltip>
+          </div>
+        </template>
+        <div class="mcp-body" v-loading="mcpLoading">
+          <div class="mcp-switch-row">
+            <span>{{ setting.mcpStatus === 0 ? $t('enabled') : $t('mcpNotEnabled') }}</span>
+            <el-switch v-model="mcpStatus" :active-value="0" :inactive-value="1" :active-text="$t('enable')"
+                       :inactive-text="$t('disable')" @change="saveMcpStatus"/>
+          </div>
+          <div class="mcp-label">{{ $t('mcpEndpoint') }}</div>
+          <el-input readonly :model-value="mcpEndpoint">
+            <template #append>
+              <el-button @click="copyText(mcpEndpoint)">{{ $t('copy') }}</el-button>
+            </template>
+          </el-input>
+          <div class="mcp-label">{{ $t('mcpToken') }}</div>
+          <el-input v-if="mcpToken" readonly :model-value="mcpToken">
+            <template #append>
+              <el-button @click="copyText(mcpToken)">{{ $t('copy') }}</el-button>
+            </template>
+          </el-input>
+          <div v-else class="mcp-empty">{{ $t('mcpTokenEmpty') }}</div>
+          <div class="mcp-actions">
+            <el-button type="primary" :loading="mcpTokenLoading" @click="rotateMcpToken">
+              {{ mcpToken ? $t('mcpRotateToken') : $t('mcpGenerateToken') }}
+            </el-button>
+            <el-button v-if="mcpToken" :loading="mcpTokenLoading" @click="revokeMcpToken">
+              {{ $t('mcpRevokeToken') }}
+            </el-button>
+          </div>
+          <div class="mcp-label">{{ $t('mcpClientConfig') }}</div>
+          <pre class="mcp-config">{{ mcpClientConfig }}</pre>
+          <el-button @click="copyText(mcpClientConfig)">{{ $t('copy') }}</el-button>
+          <div class="mcp-tip">{{ $t('mcpSecurityTip') }}</div>
+          <div class="mcp-label">{{ $t('mcpToolOverview') }}</div>
+          <div class="mcp-tools">
+            <span v-for="group in mcpToolGroups" :key="group.key" class="mcp-tool-tag">
+              {{ group.label }} {{ group.count }}
+            </span>
+          </div>
+          <div class="mcp-total">{{ $t('mcpToolTotal', { count: mcpToolTotal }) }}</div>
+        </div>
+      </el-dialog>
       <el-dialog
           v-model="forwardRulesShow"
           class="forward-dialog"
@@ -912,7 +976,7 @@ Authorization: &lt;secret&gt;</pre>
 
 <script setup>
 import {computed, defineOptions, nextTick, reactive, ref} from "vue";
-import {deleteBackground, setBackground, setBlackList, settingQuery, settingSet} from "@/request/setting.js";
+import {deleteBackground, setBackground, setBlackList, settingMcp, settingMcpRevoke, settingMcpToken, settingQuery, settingSet} from "@/request/setting.js";
 import {useSettingStore} from "@/store/setting.js";
 import {useUiStore} from "@/store/ui.js";
 import {useUserStore} from "@/store/user.js";
@@ -1051,6 +1115,38 @@ const webhookStatus = ref(1)
 const webhookRetry = ref(0)
 const webhookSecret = ref('')
 const webhookFormatShow = ref(false)
+const mcpShow = ref(false)
+const mcpLoading = ref(false)
+const mcpTokenLoading = ref(false)
+const mcpReady = ref(false)
+const mcpStatus = ref(1)
+const mcpToken = ref('')
+const mcpToolGroups = computed(() => [
+  {key: 'email', label: t('mcpGroupEmail'), count: 6},
+  {key: 'allEmail', label: t('mcpGroupAllEmail'), count: 4},
+  {key: 'public', label: t('mcpGroupPublic'), count: 2},
+  {key: 'account', label: t('mcpGroupAccount'), count: 6},
+  {key: 'user', label: t('mcpGroupUser'), count: 10},
+  {key: 'role', label: t('mcpGroupRole'), count: 7},
+  {key: 'regKey', label: t('mcpGroupRegKey'), count: 5},
+  {key: 'star', label: t('mcpGroupStar'), count: 3},
+  {key: 'setting', label: t('mcpGroupSetting'), count: 4},
+  {key: 'analysis', label: t('mcpGroupAnalysis'), count: 1},
+  {key: 'my', label: t('mcpGroupMy'), count: 1},
+])
+const mcpToolTotal = computed(() => mcpToolGroups.value.reduce((sum, group) => sum + group.count, 0))
+const mcpEndpoint = computed(() => `${window.location.origin}/mcp`)
+const mcpClientConfig = computed(() => JSON.stringify({
+  mcpServers: {
+    'cloud-mail': {
+      type: 'streamable-http',
+      url: mcpEndpoint.value,
+      headers: {
+        Authorization: mcpToken.value
+      }
+    }
+  }
+}, null, 2))
 const webhookPayloadExample = `{
   "emailId": 1,
   "sendEmail": "hello@example.com",
@@ -1253,6 +1349,102 @@ function openWebhookSetting() {
   webhookRetry.value = setting.value.webhookRetry ?? 0
   webhookSecret.value = setting.value.webhookSecret || ''
   webhookShow.value = true
+}
+
+function openMcpSetting() {
+  mcpReady.value = false
+  mcpShow.value = true
+  mcpLoading.value = true
+  settingMcp().then(data => {
+    mcpStatus.value = data?.status ?? 1
+    mcpToken.value = data?.token || ''
+    setting.value.mcpStatus = mcpStatus.value
+  }).finally(() => {
+    mcpLoading.value = false
+    nextTick(() => {
+      mcpReady.value = true
+    })
+  })
+}
+
+function saveMcpStatus(val) {
+  if (!mcpReady.value) return
+  settingSet({mcpStatus: val}).then(() => {
+    setting.value.mcpStatus = val
+    ElMessage({
+      message: t('saveSuccessMsg'),
+      type: 'success',
+      plain: true
+    })
+  }).catch(() => {
+    mcpReady.value = false
+    mcpStatus.value = setting.value.mcpStatus ?? 1
+    nextTick(() => {
+      mcpReady.value = true
+    })
+  })
+}
+
+function rotateMcpToken() {
+  const request = () => {
+    mcpTokenLoading.value = true
+    settingMcpToken().then(data => {
+      mcpToken.value = data?.token || ''
+      ElMessage({
+        message: t('saveSuccessMsg'),
+        type: 'success',
+        plain: true
+      })
+    }).finally(() => {
+      mcpTokenLoading.value = false
+    })
+  }
+  if (!mcpToken.value) {
+    request()
+    return
+  }
+  ElMessageBox.confirm(t('mcpRotateConfirm'), {
+    confirmButtonText: t('confirm'),
+    cancelButtonText: t('cancel'),
+    type: 'warning'
+  }).then(request).catch(() => {})
+}
+
+function revokeMcpToken() {
+  ElMessageBox.confirm(t('mcpRevokeConfirm'), {
+    confirmButtonText: t('confirm'),
+    cancelButtonText: t('cancel'),
+    type: 'warning'
+  }).then(() => {
+    mcpTokenLoading.value = true
+    settingMcpRevoke().then(() => {
+      mcpToken.value = ''
+      ElMessage({
+        message: t('saveSuccessMsg'),
+        type: 'success',
+        plain: true
+      })
+    }).finally(() => {
+      mcpTokenLoading.value = false
+    })
+  }).catch(() => {})
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage({
+      message: t('copySuccessMsg'),
+      type: 'success',
+      plain: true
+    })
+  } catch (e) {
+    ElMessage({
+      message: t('copyFailMsg'),
+      type: 'error',
+      plain: true
+    })
+  }
 }
 
 function openEmailPrefix() {
@@ -1663,6 +1855,7 @@ function change(e) {
   delete settingForm.s3SecretKey
   delete settingForm.tgBotToken
   delete settingForm.resendTokens
+  delete settingForm.mcpToken
   editSetting(settingForm, false)
 }
 
@@ -2080,6 +2273,65 @@ function editSetting(settingForm, refreshStatus = true) {
     border-radius: 4px;
     background: var(--el-fill-color-light);
   }
+}
+
+:deep(.mcp-dialog.el-dialog) {
+  width: 640px !important;
+  @media (max-width: 700px) {
+    width: calc(100% - 40px) !important;
+    margin-right: 20px !important;
+    margin-left: 20px !important;
+  }
+}
+
+.mcp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mcp-switch-row,
+.mcp-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mcp-label {
+  margin-top: 4px;
+  font-weight: 600;
+}
+
+.mcp-empty,
+.mcp-tip,
+.mcp-total {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.mcp-config {
+  margin: 0;
+  padding: 10px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  border-radius: 4px;
+  background: var(--el-fill-color-light);
+}
+
+.mcp-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mcp-tool-tag {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--el-fill-color-light);
+  font-size: 12px;
 }
 
 .forward {
