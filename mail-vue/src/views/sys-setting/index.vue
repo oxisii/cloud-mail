@@ -744,6 +744,19 @@ Authorization: &lt;secret&gt;</pre>
           <pre class="mcp-config">{{ mcpClientConfig }}</pre>
           <el-button @click="copyText(mcpClientConfig)">{{ $t('copy') }}</el-button>
           <div class="mcp-tip">{{ $t('mcpSecurityTip') }}</div>
+          <div class="mcp-label">{{ $t('mcpOauthClient') }}</div>
+          <el-input readonly :model-value="mcpEndpoint">
+            <template #append>
+              <el-button @click="copyText(mcpEndpoint)">{{ $t('copy') }}</el-button>
+            </template>
+          </el-input>
+          <div class="mcp-tip">{{ $t('mcpOauthTip') }}</div>
+          <div class="mcp-label">{{ $t('mcpOauthDiscovery') }}</div>
+          <el-input readonly :model-value="mcpOauthDiscovery">
+            <template #append>
+              <el-button @click="copyText(mcpOauthDiscovery)">{{ $t('copy') }}</el-button>
+            </template>
+          </el-input>
           <div class="mcp-label">{{ $t('mcpToolOverview') }}</div>
           <div class="mcp-tools">
             <span v-for="group in mcpToolGroups" :key="group.key" class="mcp-tool-tag">
@@ -1136,6 +1149,7 @@ const mcpToolGroups = computed(() => [
 ])
 const mcpToolTotal = computed(() => mcpToolGroups.value.reduce((sum, group) => sum + group.count, 0))
 const mcpEndpoint = computed(() => `${window.location.origin}/mcp`)
+const mcpOauthDiscovery = computed(() => `${window.location.origin}/.well-known/oauth-protected-resource`)
 const mcpClientConfig = computed(() => JSON.stringify({
   mcpServers: {
     'cloud-mail': {
