@@ -23,13 +23,15 @@ Cloud Mail 提供一个无状态的 MCP（Model Context Protocol）端点。管�
 - 非法 JSON 返回 `-32700`，未知方法返回 `-32601`，未知工具或参数不合法返回 `-32602`
 - `tools/call` 成功时，`content` 是一段 JSON 文本，`structuredContent` 是对应 service 的返回值，与 REST 接口 `result.ok` 里的 `data` 相同。业务异常不返回 HTTP 500，而是 `isError: true`，正文为错误消息
 
-请求头 `Authorization` 放访问令牌，也可以写成 `Bearer <令牌>`。校验顺序：
+请求头 `Authorization` 放访问令牌，也可以写成 `Bearer <令牌>`。静态令牌和 OAuth 访问令牌并行，校验顺序：
 
-1. 未开启（`mcpStatus` 不是 `0`）返回 HTTP 403
-2. 令牌为空、请求没带令牌或令牌不一致返回 HTTP 401
-3. 通过后按管理员身份继续
+1. 未开启（`mcpStatus` 不是 `0`）返回 HTTP 403，不带 `WWW-Authenticate`
+2. 与系统设置里的静态令牌一致则放行。令牌可以不带 `Bearer`，也可以带
+3. 否则把同一个请求头当作 OAuth 访问令牌，到 KV 查找。命中则放行
+4. 都不命中返回 HTTP 401。响应头为 `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource"`
+5. 通过后按 `c.env.admin` 查出管理员。查不到同样返回带上述响应头的 HTTP 401
 
-项目其它接口的业务错误写在 JSON 的 `code` 字段里，HTTP 状态仍是 200。MCP 鉴权失败按上面的 HTTP 状态返回，方便客户端识别
+项目其它接口的业务错误写在 JSON 的 `code` 字段里，HTTP 状态仍是 200。MCP 鉴权失败按上面的 HTTP 状态返回，方便客户端识别。OAuth 客户端靠 401 上的 `resource_metadata` 找到授权服务器
 
 ## 客户端配置示例
 
@@ -48,6 +50,66 @@ Cloud Mail 提供一个无状态的 MCP（Model Context Protocol）端点。管�
   }
 }
 ```
+
+## OAuth 2.1
+
+只认 OAuth 的客户端（Claude.ai、Claude 桌面端自定义连接器、ChatGPT 连接器）不使用上面的静态令牌。服务同时提供 OAuth 2.1 授权码模式，两种方式并行。这一层只把状态放在 KV 里，不新增数据库表或列，也不用再次初始化
+
+Worker 入口放行 `/.well-known/` 和 `/oauth/`，路径原样交给后端，不要加 `/api` 前缀。站点源从请求 URL 推导，不写死域名
+
+### 发现端点
+
+- `GET /.well-known/oauth-protected-resource`
+- `GET /.well-known/oauth-protected-resource/mcp`
+
+这两个地址返回同一份受保护资源元数据：`resource` 是源加 `/mcp`，`authorization_servers` 是站点源，`bearer_methods_supported` 是 `header`，`scopes_supported` 是 `mcp`
+
+- `GET /.well-known/oauth-authorization-server`
+
+授权服务器元数据。声明的授权类型只有 `authorization_code` 和 `refresh_token`，PKCE 方法只有 `S256`，客户端认证方法是 `none`、`client_secret_post`、`client_secret_basic`
+
+### 端点
+
+| 端点 | 作用 |
+| --- | --- |
+| POST /oauth/register | 动态客户端注册，请求体是 JSON |
+| GET /oauth/authorize | 校验参数后返回管理员登录页 |
+| POST /oauth/authorize | 提交管理员邮箱和密码。成功后 302 到登记过的 redirect_uri |
+| POST /oauth/token | 用授权码或刷新令牌换访问令牌。表单为主，也接受 JSON |
+| POST /oauth/revoke | 按令牌值删除访问令牌或刷新令牌。无论是否存在都返回 HTTP 200 空正文 |
+
+第三方登录仍是 `/oauth/linuxDo/login`、`/oauth/github/login`、`/oauth/google/login`，和这组端点不是同一套
+
+### 时序
+
+1. 客户端请求 `/mcp` 未带令牌时收到 HTTP 401，从 `WWW-Authenticate` 读取 `resource_metadata`，再读授权服务器元数据
+2. 尚未注册时 `POST /oauth/register`，至少提交 `redirect_uris`。`token_endpoint_auth_method` 省略时是 `none`，不发客户端密钥。指定 `client_secret_post` 或 `client_secret_basic` 时，明文密钥只在这次响应里返回
+3. 浏览器打开 `/oauth/authorize`。服务校验 `response_type=code`、`client_id` 已注册、`redirect_uri` 与注册值精确匹配、`code_challenge` 存在且 `code_challenge_method=S256`。任一失败返回 HTTP 400 纯文本，不会重定向到未校验的地址
+4. 管理员提交自己的邮箱和密码。邮箱必须是环境变量 `admin`，账号正常且未删除。失败只在页面上回显，不重定向。同一邮箱加同一 IP 一小时内失败达到 10 次后返回 HTTP 429
+5. 成功后生成授权码写入 KV（10 分钟），302 到 `redirect_uri`，附带 `code` 和原来的 `state`
+6. 客户端 `POST /oauth/token`，`grant_type=authorization_code`，带上 `code_verifier`。服务先校验客户端，再取出授权码并立即删除，然后比对 PKCE。通过后返回 `access_token`、`refresh_token`、`expires_in` 为 3600、`token_type` 为 `Bearer`、`scope` 为 `mcp`，并带 `Cache-Control: no-store`
+7. 访问令牌放在 `Authorization: Bearer` 里调用 `POST /mcp`。静态令牌仍然有效
+8. 刷新时 `grant_type=refresh_token`。旧刷新令牌删除，换发新的访问令牌和刷新令牌。旧刷新令牌不能再用
+9. 不再使用时 `POST /oauth/revoke`，`token` 为访问令牌或刷新令牌
+
+`resource` 如果出现在授权或令牌请求里，必须等于源加 `/mcp`，否则授权页返回 HTTP 400，令牌端点返回 `invalid_target`
+
+### 客户端怎么填
+
+在 Claude.ai 这类连接器里只填服务器地址 `https://<站点>/mcp`，不要填静态令牌。客户端会打开授权页，用管理员账号登录后完成授权。发现地址是 `https://<站点>/.well-known/oauth-protected-resource`。系统设置的 MCP 弹窗里可以复制这两个地址
+
+`redirect_uri` 只允许 https，或者 http 的 `localhost`、`127.0.0.1`、`[::1]`。带片段、用户名或密码的地址会拒绝。非法注册返回 HTTP 400，`error` 为 `invalid_client_metadata`
+
+### 安全说明
+
+- 只有管理员本人能授权。授权页就是登录页，没有单独的同意页，也不挂 Turnstile。嵌入式授权窗口过不了人机验证，改由管理员唯一和失败次数限制兜底
+- 只支持授权码加 PKCE S256。不支持 implicit、password、client_credentials，元数据里也不声明
+- 参数不合法时直接返回错误页，不会把浏览器送到未登记的 `redirect_uri`
+- 授权码 10 分钟且只能使用一次。访问令牌 1 小时，刷新令牌 30 天。客户端、授权码、访问令牌、刷新令牌和登录失败计数都只存在 KV
+- 公开客户端默认不保存密钥。机密客户端的密钥用盐和哈希保存，明文不落库
+- 客户端密钥校验失败返回 HTTP 401，`error` 为 `invalid_client`。授权码或刷新令牌无效返回 HTTP 400，`error` 为 `invalid_grant`
+- 刷新会作废旧的刷新令牌。撤销会按令牌值删除对应的访问令牌和刷新令牌
+- OAuth 访问令牌和静态令牌一样，通过后按管理员身份调用全部 MCP 工具
 
 ## 工具一览
 
