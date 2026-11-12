@@ -38,10 +38,6 @@ const dbInit = {
 		return c.text('success');
 	},
 
-	async v3_5DB(c) {
-		await c.env.db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_user_create_time ON email(user_id, create_time)`).run();
-	},
-
 	async v3_4DB(c) {
 		try {
 			await c.env.db.prepare(`ALTER TABLE email ADD COLUMN sender_email TEXT NOT NULL DEFAULT '';`).run();
@@ -51,6 +47,7 @@ const dbInit = {
 	},
 
 	async v3_5DB(c) {
+		await c.env.db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_user_create_time ON email(user_id, create_time)`).run();
 		try {
 			await c.env.db.prepare(`ALTER TABLE setting ADD COLUMN mcp_status INTEGER NOT NULL DEFAULT 1;`).run();
 		} catch (e) {
